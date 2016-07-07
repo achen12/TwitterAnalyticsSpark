@@ -1,0 +1,9 @@
+<component name="libraryTable">
+  <library name="spark-assembly_2.10-1.6.0-tests">
+    <CLASSES>
+      <root url="jar://$PROJECT_DIR$/../spark-1.6.0/assembly/target/spark-assembly_2.10-1.6.0-tests.jar!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>

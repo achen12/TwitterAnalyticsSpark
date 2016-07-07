@@ -1,0 +1,9 @@
+<component name="libraryTable">
+  <library name="spark-sql_2.10-1.6.0">
+    <CLASSES>
+      <root url="jar://$PROJECT_DIR$/../spark-1.6.0/sql/core/target/spark-sql_2.10-1.6.0.jar!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>

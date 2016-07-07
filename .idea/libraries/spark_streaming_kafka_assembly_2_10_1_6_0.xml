@@ -1,0 +1,9 @@
+<component name="libraryTable">
+  <library name="spark-streaming-kafka-assembly_2.10-1.6.0">
+    <CLASSES>
+      <root url="jar://$PROJECT_DIR$/../spark-1.6.0/external/kafka-assembly/target/spark-streaming-kafka-assembly_2.10-1.6.0.jar!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>

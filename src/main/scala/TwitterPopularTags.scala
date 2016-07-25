@@ -84,8 +84,8 @@ object TwitterPopularTags {
     //Volume
     
     val hashTags = stream.flatMap(status => status.getText.split(" ").filter(_.startsWith("#"))).map((_,1))
-    
     val sumVolume  = hashTags.reduceByKeyAndWindow(_ + _, analyticWindow)
+
     val volume = sumVolume.map{case (topic, count) => (count, topic)}
         .transform(_.sortByKey(false))
 

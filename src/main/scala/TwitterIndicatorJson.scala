@@ -18,11 +18,20 @@
 // scalastyle:off println
 import org.apache.spark.streaming._
 import org.apache.spark.SparkContext._
+import org.apache.spark.streaming.kafka.KafkaUtils
 import org.apache.spark.streaming.twitter._
 import org.apache.spark.SparkConf
 import org.apache.log4j.{Level, Logger}
 import org.apache.spark.Logging
 import org.apache.spark.rdd._
+import org.apache.spark.streaming.kafka
+import org.apache.spark.streaming.dstream.PairDStreamFunctions
+import twitter4j.TwitterObjectFactory
+import org.apache.spark.streaming.dstream.UnionDStream
+import twitter4j.Status
+import org.apache.spark.streaming.dstream.{VectorDStream,RecurrentVectorDStream}
+
+
 
 /**
  * Calculates popular hashtags (topics) over sliding 10 and 60 second windows from a Twitter
@@ -34,6 +43,7 @@ import org.apache.spark.rdd._
  */
 object StreamingExamples extends Logging{
     def setStreamingLogLevels(){
+
         val log4jInitialized = Logger.getRootLogger.getAllAppenders.hasMoreElements
         if(!log4jInitialized){
             logInfo("Setting log level to [WARN] for streaming example.")
@@ -42,7 +52,7 @@ object StreamingExamples extends Logging{
     }
 }
 
-object TwitterPopularTags {
+object TwitterIndicatorJson {
   def velocityTTransformFunc(givenRdd:RDD[(String,Long)] , givenT:Time) : RDD[(String,Long)] = {
     givenRdd.map[(String,Long)]{case(x,y) => (x,givenT.milliseconds*y)}
     return givenRdd
@@ -52,82 +62,106 @@ object TwitterPopularTags {
     var batchWindow = Seconds(2);
     var analyticWindow = batchWindow*16;
     var referenceWindow = analyticWindow*16;
-    val consumerKey = TwitterCred.consumerKey
-    val consumerSecret = TwitterCred.consumerSecret
-    val accessToken = TwitterCred.accessToken
-    val accessTokenSecret = TwitterCred.accessTokenSecret
 
     StreamingExamples.setStreamingLogLevels()
 
-    val filters = Array()
-
-    // Set the system properties so that Twitter4j library used by twitter stream
-    // can use them to generate OAuth credentials
-    System.setProperty("twitter4j.oauth.consumerKey", consumerKey)
-    System.setProperty("twitter4j.oauth.consumerSecret", consumerSecret)
-    System.setProperty("twitter4j.oauth.accessToken", accessToken)
-    System.setProperty("twitter4j.oauth.accessTokenSecret", accessTokenSecret)
 
     val sparkConf = new SparkConf()
-        .setAppName("TwitterPopularTags")
+        .setAppName("JsonPopularTags")
         .setMaster("local[2]")
     val ssc = new StreamingContext(sparkConf, batchWindow)
     ssc.checkpoint("./checkpoint")
-    val stream = TwitterUtils.createStream(ssc, None)
+
+    var propFile: String = "config/analyzer.config"
 
 
+
+    val topic = Map(("Tweet",1))
+    val zkQuorum = "localhost:2181"
+    val Kstream = KafkaUtils.createStream(ssc,zkQuorum, "0", topic)
+
+    val stream = Kstream.filter(x => !x._2.substring(0,9).equals("{\"delete\"")).map[Status](x => TwitterObjectFactory.createStatus( x._2))
 
     // Starts with 30 seconds windows
 
     //Volume
-    
+
     val hashTags = stream.flatMap(status => status.getText.split(" ").filter(_.startsWith("#"))).map((_,1))
-    
     val sumVolume  = hashTags.reduceByKeyAndWindow(_ + _, analyticWindow)
     val volume = sumVolume.map{case (topic, count) => (count, topic)}
-        .transform(_.sortByKey(false))
+      .transform(_.sortByKey(false))
+      .map{case (count, topic) => (topic,count)}
 
     //Velocity
     val halfSumVolume = hashTags.reduceByKeyAndWindow(_ + _, new Duration(analyticWindow.milliseconds/2))
     val diffVelocity = halfSumVolume.join[Int](other = sumVolume).mapValues[Int]{case(a:Int,b:Int) => (2*a - b)}
     val velocity = diffVelocity.map{case (topic, count) => (count, topic)}
       .transform(_.sortByKey(false))
+      .map{case (count, topic) => (topic,count)}
     /**
-    val minVelocity = hashTags.reduceByKeyAndWindow(_-_, windowDuration= batchWindow*2, slideDuration = batchWindow)
-    val windowedVelocity = minVelocity
-      .mapValues(1.0*_).cache()
-        .reduceByKeyAndWindow(reduceFunc = {case(x,y) => x + 0.1*y}, windowDuration = analyticWindow, slideDuration = batchWindow)
-      .map{case (topic, count) => (count, topic)}
-      .transform(_.sortByKey(false))
+    *val minVelocity = hashTags.reduceByKeyAndWindow(_-_, windowDuration= batchWindow*2, slideDuration = batchWindow)
+    *val windowedVelocity = minVelocity
+      *.mapValues(1.0*_).cache()
+        *.reduceByKeyAndWindow(reduceFunc = {case(x,y) => x + 0.1*y}, windowDuration = analyticWindow, slideDuration = batchWindow)
+      *.map{case (topic, count) => (count, topic)}
+      *.transform(_.sortByKey(false))
       **/
 
 
 
   //    val hashTagsTime = stream.flatMap( status => status.getText.split(" ").filter(_.) )
-                        
+
 
 
 //Unique User
 
     val hashTagsUser = stream.flatMap(status => status.getText.split(" ").filter(_.startsWith("#")).map{x => ( x, status.getUser.getScreenName)})
-    
-    val usersPerHashTags = hashTagsUser.mapValues[List[String]]{ user =>  List(user)}
-                                        .reduceByKeyAndWindow({case (user1,user2) => List.concat(user1,user2)}, analyticWindow)
-                                        .mapValues{ userList => userList.distinct.length}
-                                        .map{case (hash,count) => (count,hash)}
-                                        .transform(_.sortByKey(false))
-//                                        .map{case(hash,user) =>  (hash,user.split(" ").toList.distinct().count() )}
-    
 
-//MultiTag Activeness
-    
+    val usersPerHashTags = hashTagsUser.mapValues[List[String]]{ user =>  List(user)}
+      .reduceByKeyAndWindow({case (user1,user2) => List.concat(user1,user2)}, analyticWindow)
+      .mapValues{ userList => userList.distinct.length}
+      .map{case (hash,count) => (count,hash)}
+      .transform(_.sortByKey(false))
+//      .map{case(hash,user) =>  (hash,user.split(" ").toList.distinct().count() )}
+      .map{case (count, topic) => (topic,count)}
+
+//FollowerPinged by Hashtags
+
+    val hashTagsFollower = stream.flatMap(status => status.getText.split(" ").filter(_.startsWith("#")).map{x => ( x, status.getUser.getFollowersCount)})
+
+    val followerPerHashTags = hashTagsFollower.reduceByKeyAndWindow(_+_,analyticWindow)
+      .map{case (hash,count) => (count,hash)}
+      .transform(_.sortByKey(false))
+      .map{case (count, topic) => (topic,count)}
+
+//FriendsPings by Hashtags
+    val hashTagsFriends = stream.flatMap(status => status.getText.split(" ").filter(_.startsWith("#")).map{x => ( x, status.getUser.getFriendsCount)})
+
+    val friendsPerHashTags = hashTagsFriends.reduceByKeyAndWindow(_+_,analyticWindow)
+      .map{case (hash,count) => (count,hash)}
+      .transform(_.sortByKey(false))
+      .map{case (count, topic) => (topic,count)}
+
+
+//Retweeted Volume
+    val hashTagsRetweetedVolume = stream.filter(status=> status.getRetweetedStatus!= null).flatMap(status => status.getText.split(" ").filter(_.startsWith("#")).map{x => ( x, status.getRetweetedStatus.getRetweetCount)})
+    val retweetedVolumePerHashTags = hashTagsRetweetedVolume.reduceByKeyAndWindow(_+_,analyticWindow)
+      .map{case (hash,count) => (count,hash)}
+      .transform(_.sortByKey(false))
+      .map{case (count, topic) => (topic,count)}
+
+
+
+    //MultiTag Activeness
+
     val multiHashTags = stream.map{status => status.getText.split(" ").filter(_.startsWith("#"))}
 
     val windowActiveness = multiHashTags.flatMap{ hashs => hashs.map(x => (x,hashs))}
       .reduceByKeyAndWindow(reduceFunc = {(x,y) => Array.concat(x,y)},analyticWindow)
       .mapValues{ hashesList => hashesList.distinct.length}
-                                        .map{case (topic, count) => (count, topic)}
-                                         .transform(_.sortByKey(false))
+      .map{case (topic, count) => (count, topic)}
+      .transform(_.sortByKey(false))
+      .map{case (count, topic) => (topic,count)}
 
 
 //1stDeg Count
@@ -138,7 +172,6 @@ object TwitterPopularTags {
       .reduceByKeyAndWindow(reduceFunc = {(x,y) => Array.concat(x,y)},analyticWindow)
       .flatMapValues{ hashesList => hashesList.distinct}
       .join[Int](refSumVolume)
-
       .transform(rdda => {
           val hashVolMap = rdda.mapValues[Int]{case(y,x)=>x}.collectAsMap()
           rdda.mapValues[Int]{case(hash , counts) =>
@@ -146,18 +179,19 @@ object TwitterPopularTags {
       .reduceByKeyAndWindow(_+_,analyticWindow)
       .map{case (topic, count) => (count, topic)}
       .transform(_.sortByKey(false))
+      .map{case (count, topic) => (topic,count)}
 
 
     /**
-    val firstDegCount = multiHashTags.flatMap(x => x.map( (_,List(x))))
-                                        .reduceByKey(_+_) //Compute all other hash in window
-                                        .map{case (hash,otherhashs) => (hash,otherhashs.distinct())} //Unique Hashs
-                                        .map{case (hash,otherhashs) => (hash, otherhashs)    }
+    *val firstDegCount = multiHashTags.flatMap(x => x.map( (_,List(x))))
+                                        *.reduceByKey(_+_) //Compute all other hash in window
+                                        *.map{case (hash,otherhashs) => (hash,otherhashs.distinct())} //Unique Hashs
+                                        *.map{case (hash,otherhashs) => (hash, otherhashs)    }
       **/
 
     /**multiHashTags.transform[(String,Int)]{ (rdd:RDD[List[String]],t:Time) => rdd.map{ x => x.flatMap{ hash =>
-                                                    (hash, x.flatMap{otherhash => meanVolume.compute(t).get.map{case(count,hash)=>(hash,count)}.lookup(hash)}.reduce(_+_))
-                                                } } } **/
+                                                    *(hash, x.flatMap{otherhash => meanVolume.compute(t).get.map{case(count,hash)=>(hash,count)}.lookup(hash)}.reduce(_+_))
+                                                *} } } **/
 
 
 
@@ -171,23 +205,58 @@ object TwitterPopularTags {
         sum = y.first()
       }
       x.mapValues[Float]( xi => xi.toFloat / sum)
+
     })
     val percentShare = percentShareByVolume.map{case (topic, count) => (count, topic)}
       .transform(_.sortByKey(false))
+      .map{case (count, topic) => (topic,count)}
 
     //Delta Percent Share
     val percentShareRef = percentShareByVolume.reduceByKeyAndWindow((x,y) => (x+y) / 2,referenceWindow)
     val deltaPercentShare = percentShareByVolume.join[Float](percentShareRef).mapValues[Float](x => x._1 - x._2)
        .map{case (topic, count) => (count, topic)}
        .transform(_.sortByKey(false))
+       .map{case (count, topic) => (topic,count)}
 
     //Test Environment
-    deltaPercentShare.foreachRDD (rdd => {
+/**
+    retweetedVolumePerHashTags.foreachRDD (rdd => {
         val topList = rdd.take(10)
-        println("\n============Test test TweetShare ===============")
-        topList.foreach{println(_)}
- //       topList.foreach{ case(key,value)=> println("%s %s".format(key,value)) }
+        println("\n============Test test retweeted ===============")
+ //       topList.foreach{println(_)}
+        topList.foreach{ case(key,value)=> println("%s %s".format(key,value)) }
     })
+    friendsPerHashTags.foreachRDD (rdd => {
+      val topList = rdd.take(10)
+      println("\n============Test test friends ===============")
+      //       topList.foreach{println(_)}
+      topList.foreach{ case(key,value)=> println("%s %s".format(key,value)) }
+    })
+    followerPerHashTags.foreachRDD (rdd => {
+      val topList = rdd.take(10)
+      println("\n============Test test follower ===============")
+      //       topList.foreach{println(_)}
+      topList.foreach{ case(key,value)=> println("%s %s".format(key,value)) }
+    })
+*/
+    //Collect everything into ML Vectors
+    //1.Join (volumne, velocity, usersPerHashTags, windowActiveness,mapRDegCount)
+    val MLVector = new VectorDStream(Array(volume.mapValues[Double](_.toDouble),usersPerHashTags.mapValues[Double](_.toDouble),
+      windowActiveness.mapValues[Double](_.toDouble),mapRDegCount.mapValues[Double](_.toDouble)))
+      //volume.join(velocity).join(usersPerHashTags).join(windowActiveness).join(mapRDegCount)
+      //.mapValues[Array[Float]](x => Array(,x._1._1._1._1.toFloat,x._1._1._1._2.toFloat,x._1._1._2.toFloat,x._1._2.toFloat,x._2.toFloat))
+
+    //2. Recurrent
+    val X_Vector = new RecurrentVectorDStream[String](MLVector,Minutes(2),Seconds(10))
+
+
+    //MLVector.print(10)
+qqqqq
+    X_Vector.foreachRDD(rdd => {
+      val topList = rdd.take(10)
+      println("\nFirst 10 ML Vectors (%s total):".format(rdd.count()))
+      topList.foreach{case (hash, vector) => println("%s (%s)".format(hash, vector))}
+      })
 
 
 
@@ -198,30 +267,30 @@ object TwitterPopularTags {
       topList.foreach{case (count, tag) => println("%s (%s tweets)".format(tag, count))}
     })
 
-    velocity.foreachRDD(rdd => {
-      val topList = rdd.take(10)
-      println("\nTop Velocity Hashtags in past 32 seconds :")
-      topList.foreach{case (count, tag) => println("%s (%s Delta-Tweets)".format(tag, count))}
-    })
+    *velocity.foreachRDD(rdd => {
+      *val topList = rdd.take(10)
+      *println("\nTop Velocity Hashtags in past 32 seconds :")
+      *topList.foreach{case (count, tag) => println("%s (%s Delta-Tweets)".format(tag, count))}
+    *})
 
 
-    usersPerHashTags.foreachRDD(rdd => {
-      val topList = rdd.take(10)
-      println("\nTop Unique User Count Hashtags in past 32 seconds:")
-      topList.foreach{case (count, tag) => println("%s (%s Unique Users)".format(tag, count))}
-    })
+    *usersPerHashTags.foreachRDD(rdd => {
+      *val topList = rdd.take(10)
+      *println("\nTop Unique User Count Hashtags in past 32 seconds:")
+      *topList.foreach{case (count, tag) => println("%s (%s Unique Users)".format(tag, count))}
+    *})
 
-    windowActiveness.foreachRDD(rdd => {
-      val topList = rdd.take(10)
-      println("\nTop Active (Chain) Hashtags in past 32 seconds:")
-      topList.foreach{case (count, tag) => println("%s (%s hashes)".format(tag, count))}
-    })
+    *windowActiveness.foreachRDD(rdd => {
+      *val topList = rdd.take(10)
+      *println("\nTop Active (Chain) Hashtags in past 32 seconds:")
+      *topList.foreach{case (count, tag) => println("%s (%s hashes)".format(tag, count))}
+    *})
 
-    mapRDegCount.foreachRDD(rdd => {
-      val topList = rdd.take(10)
-      println("\nTop 1st Deg Count Tweets in past 32 seconds:")
-      topList.foreach{case (count, tag) => println("%s (%s tweets)".format(tag, count))}
-    })
+    *mapRDegCount.foreachRDD(rdd => {
+      *val topList = rdd.take(10)
+      *println("\nTop 1st Deg Count Tweets in past 32 seconds:")
+      *topList.foreach{case (count, tag) => println("%s (%s tweets)".format(tag, count))}
+    *})
 **/
     ssc.start()
     ssc.awaitTermination()
